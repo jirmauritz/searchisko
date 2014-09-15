@@ -1,0 +1,13 @@
+{
+  "code": "mobile",
+  "name": "Red Hat JBoss Mobile Add-On",
+  "type_specific_code" : {
+    "jbossorg_blog": [""],
+    "jbossorg_jira": [""],
+    "jbossorg_sbs" : ["2346"],
+    "jbossorg_mailing_list": "",
+    "jbossorg_project_info": "",
+    "jbossdeveloper_website_code": ["mobile","Red Hat JBoss Mobile Add-On","JBoss Mobile"],
+    "product" : true
+  }
+}
