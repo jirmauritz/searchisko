@@ -9,3 +9,4 @@ deployments
 .dcp_data
 test.*
 /ftest.sh
+*.properties
