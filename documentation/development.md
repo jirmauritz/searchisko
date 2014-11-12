@@ -161,7 +161,7 @@ to the `$EAP6HOME/standalone/deployments` folder.
 You can use [Eclipse with JBoss Tools](http://www.jboss.org/tools) or 
 [JBoss Developer Studio](https://devstudio.jboss.com) for this.
 
-The Searchisko REST API is then available at [`http://localhost:8080/v1/rest/`](http://localhost:8080/v1/rest/)  
+The Searchisko REST API is then available at [`http://localhost:8080/v2/rest/`](http://localhost:8080/v2/rest/)  
 The ElasticSearch search node REST API is available at [`http://localhost:15000/`](http://localhost:15000/)  
 
 **Note #1**: When you use the standard configuration of the embedded h2 database then data are lost
@@ -194,12 +194,12 @@ No details yet. This is internal server.
 
 Simply login to [OpenShift](https://openshift.redhat.com), create new Application 
 with 'JBoss Enterprise Application Platform 6.0 Cartridge ' 
-and add 'MySQL Database 5.1' cartridge into it.
+and add 'MySQL Database 5.5' cartridge into it.
 
 Then push content of this git repo (`git push openshift master` or `git push openshift {local_branch_name}:master` if working on branch)
 into the OpenShift application's git repo. Then Searchisko is built and deployed automatically.
 
-The Searchisko REST API is then available at `http://your_openshift_aplication_url/v1/rest/`  
+The Searchisko REST API is then available at `http://your_openshift_aplication_url/v2/rest/`  
 The ElasticSearch search node REST API is available only from gear shell at `http://$OPENSHIFT_JBOSSEAP_IP:15000/`,
 you have to use port forwarding to access it from outside.
 
@@ -214,6 +214,8 @@ TODO
 
 ## Initialization
 
+### Initialization from scratch
+
 After the Searchisko is deployed it's necessary to initialize it. Next initialization steps are necessary:
 
 2. Create ElasticSearch index templates and indices over ElasticSearch REST API
@@ -225,7 +227,7 @@ After the Searchisko is deployed it's necessary to initialize it. Next initializ
    - contributors
 5. Update Contributor profiles by executing `update_contributor_profile` task, e.g.:
 
-	curl -X POST -H "Content-Type: application/json" --user jbossorg:jbossorgjbossorg https://your_openshift_aplication_url/v1/rest/tasks/task/update_contributor_profile -d '{"contributor_type_specific_code_type" : "jbossorg_username"}'
+		curl -X POST -H "Content-Type: application/json" --user jbossorg:jbossorgjbossorg https://your_openshift_aplication_url/v2/rest/tasks/task/update_contributor_profile -d '{"contributor_type_specific_code_type" : "jbossorg_username"}'
 
 6. Initialize ElasticSearch rivers if any used to collect data
 
@@ -238,3 +240,38 @@ and password `jbossorgjbossorg` during Searchisko first start. You can use it fo
 initialization. It's highly recommended to change default 
 password on publicly available instances!
 
+### Initialization from existing instance using DB backup
+
+In case you have already running instance and you'd like to create same instance with same configuration/data follow these instructions for Openshift installation:
+
+1. Create a new Openshfit instance. See section above.
+2. Log in terminal to existing Openshift instance and create DB Backup
+	
+		mysqldump -h $OPENSHIFT_MYSQL_DB_HOST -P ${OPENSHIFT_MYSQL_DB_PORT:-3306} -u ${OPENSHIFT_MYSQL_DB_USERNAME} --password="$OPENSHIFT_MYSQL_DB_PASSWORD" --no-create-db "$OPENSHIFT_APP_NAME" | gzip > searchiskodb-backup.sql.gz
+
+3. Copy dump to another instance (copy to your local machine and then to new instance to `~/app-root/data`)
+4. Log in in terminal to the target instance and import dump
+
+		gunzip < searchiskodb-backup.sql.gz | mysql -h $OPENSHIFT_MYSQL_DB_HOST -P ${OPENSHIFT_MYSQL_DB_PORT} -u ${OPENSHIFT_MYSQL_DB_USERNAME} --password="$OPENSHIFT_MYSQL_DB_PASSWORD" "$OPENSHIFT_APP_NAME"
+
+5. Set Openshift environment properties if needed e.g. `SEARCHISKO_CB_PROVIDER_USERNAME` and `SEARCHISKO_CB_PROVIDER_PASSWORD` variables
+6. Force push your current git repo to new Openshift instance
+7. Initialize Searchisko like from scratch. See section above
+8. Run task reindexation for each persisted content type. Example:
+
+		curl -X POST -H "Content-Type: application/json" --user jbossorg:jbossorgjbossorg https://your_openshift_aplication_url/v2/rest/tasks/task/reindex_from_persistence -d '{"sys_content_type" : "jbossorg_blog"}'
+
+To generate list of these commands from current configuration run
+
+        configuration/data/provider/print-persisted-content-types.py -U https://your_openshift_aplication_url
+        or use -u and -p arguments to pass different username and password
+		configuration/data/provider/print-persisted-content-types.py -U https://your_openshift_aplication_url -u username -p password
+
+### Initialization from existing instance using Openshift backup/restore
+
+		rhc snapshot save searchisko1
+		rhc app create searchisko2 jbosseap-6 mysql-5.5 -g medium
+		rhc snapshot restore searchisko2 --filepath searchisko1.tar.gz
+		rhc app-deploy master --app searchisko2
+
+Note: app-deploy is needed because deployment replaces various variables by current Openshift values like `OPENSHIFT_MYSQL_DB_HOST` etc.

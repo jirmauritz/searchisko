@@ -8,7 +8,7 @@ First we explain what schema is used to address documents in Elasticsearch. Then
 ### Elasticsearch index, type and id
 
 In Elasticsearch it is pretty simple, documents live under `index`/`type` namespace.
-When you [put](http://www.elasticsearch.org/guide/en/elasticsearch/reference/0.90/docs-index_.html) a document into
+When you [put](http://www.elasticsearch.org/guide/en/elasticsearch/reference/1.3/docs-index_.html) a document into
 Elasticsearch you use the following notation:
 
 ```
@@ -35,7 +35,7 @@ Let's have the following content in the `some_json_file.json` file:
 }
 ```
 
-When you index such document into Elasticsearch and [_search_](http://www.elasticsearch.org/guide/en/elasticsearch/reference/0.90/search.html) or [_get_](http://www.elasticsearch.org/guide/en/elasticsearch/reference/0.90/docs-get.html) it back later, it will look like this:
+When you index such document into Elasticsearch and [_search_](http://www.elasticsearch.org/guide/en/elasticsearch/reference/1.3/search.html) or [_get_](http://www.elasticsearch.org/guide/en/elasticsearch/reference/1.3/docs-get.html) it back later, it will look like this:
 
 ```
 {
@@ -62,11 +62,11 @@ Now, in Searchisko documents live under differently organized (modelled) namespa
 An authenticated authority that is allowed to push new content (documents) into Searchisko is called a [content provider](management/content_provider.md) and its code goes into `sys_content_provider` field in every indexed document.
 Each content provider can create documents of predefined types (list of predefined document types is part of content provider definition). This document type goes into `sys_content_type` field.
 
-When you [post](http://docs.jbossorg.apiary.io/#post-%2Fv1%2Frest%2Fcontent%2F%7Bsys_content_type%7D%2F%7Bsys_content_id%7D)
+When you [post](http://docs.jbossorg.apiary.io/#post-%2Fv2%2Frest%2Fcontent%2F%7Bsys_content_type%7D%2F%7Bsys_content_id%7D)
 a document into Searchisko you use the following notation:
 
 ```
-curl --user ${username}:${password} -X POST <host>:<port>/v1/rest/content/{sys_content_type}/{sys_content_id} -d@json_file_name.json
+curl --user ${username}:${password} -X POST <host>:<port>/v2/rest/content/{sys_content_type}/{sys_content_id} -d@json_file_name.json
 ```
 where:
 
@@ -79,7 +79,7 @@ Part of the document type definition within content provider configuration are n
 When you index such document into Searchisko and [_search_](http://docs.jbossorg.apiary.io/#searchapi) for it later:
 
 ```
-https://dcp-jbossorgdev.rhcloud.com/v1/rest/search?query=sys_id:jbossorg_sbs_forum-158696&field=_source
+https://dcp-jbossorgdev.rhcloud.com/v2/rest/search?query=sys_id:jbossorg_sbs_forum-158696&field=_source
 ```
 the response will look similar to the following:
 
@@ -113,4 +113,4 @@ the response will look similar to the following:
   }
 }
 ```
-Note that Searchisko did some modifications to the original document according to the [Searchisko configuration](https://github.com/searchisko/searchisko/tree/master/configuration) and [content provider configuration](https://github.com/searchisko/searchisko/tree/master/configuration/data/provider) for relevant `sys_content_provider` and particular `sys_content_type` input_preprocessors. For example it turned original `author` field into `sys_contributors` field containing full email address and name format (providing [contributors](https://github.com/searchisko/searchisko/tree/master/configuration/data/contributor) were configured accordingly) or it used original `date` value to populate several `sys_*` fields (e.g. `sys_activity_dates`, `sys_last_activity_date` or `sys_updated`) which are used at various occasions, like calculating `activity_dates_histogram` facet, sortBy by `old` or `new` … etc.
+Note that Searchisko did some modifications to the original document according to the [Searchisko configuration](https://github.com/searchisko/searchisko/tree/master/configuration) and [content provider configuration](https://github.com/searchisko/searchisko/tree/master/configuration/data/provider) for relevant `sys_content_provider` and particular `sys_content_type` input_preprocessors. For example it turned original `author` field into `sys_contributors` field containing full email address and name format (providing [contributors](https://github.com/searchisko/searchisko/tree/master/configuration/data/contributor) were configured accordingly) or it used original `date` value to populate several `sys_*` fields (e.g. `sys_activity_dates`, `sys_last_activity_date` or `sys_updated`) which are used at various occasions, like calculating `activity_dates_histogram` aggregation, sortBy by `old` or `new` … etc.
