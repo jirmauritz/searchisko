@@ -2,7 +2,15 @@
 
 This document contains high-level release notes. More details can be found in [milestones](https://github.com/searchisko/searchisko/issues/milestones) on GitHub.
 
-## 2.0.0
+## 2.0.0-SNAPSHOT
+
+Breaking:
+
+- API URL starts with /v2 [#171](https://github.com/searchisko/searchisko/issues/171) 
+- Search API switched from `query_string_query` to `simple_query_string` type.
+ This change is needed to support improved security model. [#140](https://github.com/searchisko/searchisko/issues/140) 
+- Search API switched from Facets to Aggregations.
+ This change is related to deprecation of Facets in Elasticsearch 1.3. [#144](https://github.com/searchisko/searchisko/issues/144)
 
 Improvements:
 
@@ -17,6 +25,7 @@ Improvements:
 - New task for syncing all uses from contributor profile provider [#141](https://github.com/searchisko/searchisko/issues/141)
  
 Internal:
+
 - Upgrade to elasticsearch 1.3.0 [#48](https://github.com/searchisko/searchisko/issues/48)
 
 ## 1.1.1

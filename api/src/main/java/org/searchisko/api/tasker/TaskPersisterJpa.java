@@ -30,7 +30,7 @@ import org.elasticsearch.common.Strings;
 /**
  * JPA based implementation of {@link TaskPersister}. Uses shared RDBMS to persist tasks and synchronize execution in
  * the cluster.
- *
+ * 
  * @author Vlastimil Elias (velias at redhat dot com)
  */
 @Stateless
@@ -44,7 +44,7 @@ public class TaskPersisterJpa implements TaskPersister {
 
 	/**
 	 * Create persister.
-	 *
+	 * 
 	 */
 	public TaskPersisterJpa() {
 		super();
@@ -151,17 +151,49 @@ public class TaskPersisterJpa implements TaskPersister {
 		if (tsi != null && !tsi.isEmpty()) {
 			for (int i = tsi.size() - 1; i >= 0; i--) {
 				TaskStatusInfo work = tsi.get(i);
-				try {
-					em.lock(work, LockModeType.PESSIMISTIC_WRITE);
-					if (work.startTaskExecution(nodeId)) {
-						return work;
+				if (taskIsRunnableNow(nodeId, work)) {
+					try {
+						em.lock(work, LockModeType.PESSIMISTIC_WRITE);
+						if (work.startTaskExecution(nodeId)) {
+							return work;
+						}
+					} catch (LockTimeoutException e) {
+						log.fine("Lock exception for task id=" + work.getId());
 					}
-				} catch (LockTimeoutException e) {
-					log.fine("Lock exception for task id=" + work.getId());
 				}
 			}
 		}
 		return null;
+	}
+
+	public static final long FAILOVER_DELAY_10 = 10 * 1000L;
+	public static final long FAILOVER_DELAY_30 = 60 * 1000L;
+	public static final long FAILOVER_DELAY_100 = 5 * 60 * 1000L;
+
+	protected boolean taskIsRunnableNow(String nodeId, TaskStatusInfo work) {
+		if (TaskStatus.FAILOVER == work.getTaskStatus()) {
+			// #189 - give some timeout for failover attempt
+			Date d = work.getLastRunFinishedAt();
+			if (d != null) {
+				if (nodeId.equals(work.getExecutionNodeId()) || work.getRunCount() > 1) {
+					// we run on same node or more failover attempts so use longer timeouts as we do not cope with cluster
+					// failover probably, there is some more serious runtime problem
+
+					long delay = FAILOVER_DELAY_10;
+					if (work.getRunCount() > 40) {
+						delay = FAILOVER_DELAY_100;
+					} else if (work.getRunCount() > 10) {
+						delay = FAILOVER_DELAY_30;
+					}
+
+					return System.currentTimeMillis() >= (d.getTime() + delay);
+				} else {
+					// first failover on other node so it is real cluster failover probably, so use no timeout.
+					return true;
+				}
+			}
+		}
+		return true;
 	}
 
 	private static final List<TaskStatus> runningTaskStatusFilter = new ArrayList<>();

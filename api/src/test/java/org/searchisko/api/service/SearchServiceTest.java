@@ -18,6 +18,7 @@ import java.util.Set;
 import org.elasticsearch.action.search.SearchRequestBuilder;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.common.joda.time.DateTime;
+import org.elasticsearch.common.joda.time.DateTimeZone;
 import org.elasticsearch.common.settings.SettingsException;
 import org.elasticsearch.index.query.FilterBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
@@ -33,6 +34,7 @@ import org.searchisko.api.model.PastIntervalValue;
 import org.searchisko.api.model.QuerySettings;
 import org.searchisko.api.model.QuerySettings.Filters;
 import org.searchisko.api.model.SortByValue;
+import org.searchisko.api.rest.exception.BadFieldException;
 import org.searchisko.api.rest.exception.NotAuthorizedException;
 import org.searchisko.api.security.Role;
 import org.searchisko.api.testtools.TestUtils;
@@ -69,20 +71,20 @@ public class SearchServiceTest extends SearchServiceTestBase {
 		SearchService tested = getTested(configService);
 
 		try {
-			tested.getIntervalValuesForDateHistogramFacets(null);
+			tested.getIntervalValuesForDateHistogramAggregations(null);
 			Assert.fail("NullPointerException expected");
 		} catch (NullPointerException e) {
 			// OK
 		}
 
 		QuerySettings qs = new QuerySettings();
-		Map<String, String> ret = tested.getIntervalValuesForDateHistogramFacets(qs);
+		Map<String, String> ret = tested.getIntervalValuesForDateHistogramAggregations(qs);
 		Assert.assertTrue(ret.isEmpty());
 
-		qs.addFacet("activity_dates_histogram");
+		qs.addAggregation("activity_dates_histogram");
 		qs.getFiltersInit().acknowledgeUrlFilterCandidate("activity_date_interval", PastIntervalValue.QUARTER.toString());
 		tested.parsedFilterConfigService.prepareFiltersForRequest(qs.getFilters());
-		ret = tested.getIntervalValuesForDateHistogramFacets(qs);
+		ret = tested.getIntervalValuesForDateHistogramAggregations(qs);
 		Assert.assertEquals(1, ret.size());
 		Assert.assertEquals("week", ret.get("activity_dates_histogram_interval"));
 
@@ -791,6 +793,21 @@ public class SearchServiceTest extends SearchServiceTestBase {
 			Mockito.verify(tested.configService).get(ConfigService.CFGNAME_SEARCH_RESPONSE_FIELDS);
 			Mockito.verifyZeroInteractions(tested.configService);
 		}
+
+		// case - fields requested but * used there which is invalid
+		{
+			Mockito.reset(srbMock, tested.configService);
+			QuerySettings querySettings = new QuerySettings();
+			querySettings.addField("aa");
+			querySettings.addField("*");
+			try {
+				tested.setSearchRequestFields(querySettings, srbMock);
+				Assert.fail("BadFieldException expected");
+			} catch (BadFieldException e) {
+				Assert.assertEquals(QuerySettings.FIELDS_KEY, e.getFieldName());
+
+			}
+		}
 	}
 
 	@Test
@@ -811,6 +828,9 @@ public class SearchServiceTest extends SearchServiceTestBase {
 		rolesSettings.put("bb", "role1");
 		rolesSettings.put("cc", "role1");
 		mockConfig.put(SearchService.CFGNAME_FIELD_VISIBLE_FOR_ROLES, rolesSettings);
+
+		// we configure source filtering to check it is not used when _source field is not requested
+		mockConfig.put(SearchService.CFGNAME_SOURCE_FILTERING_FOR_ROLES, rolesSettings);
 
 		// case - no fields requested so defaults loaded from configuration, but no any available for current user
 		{
@@ -903,6 +923,146 @@ public class SearchServiceTest extends SearchServiceTestBase {
 			Mockito.verify(srbMock).addFields("aa", "bb", "cc");
 			Mockito.verifyNoMoreInteractions(srbMock);
 			Mockito.verifyNoMoreInteractions(tested.configService);
+		}
+
+	}
+
+	@Test
+	public void handleResponseContentSettings_fields_source_filtering() {
+		// note that test which covers source filtering is not used when _source is not requested is in
+		// handleResponseContentSettings_fields_security()
+
+		ConfigService configService = Mockito.mock(ConfigService.class);
+		SearchService tested = getTested(configService);
+
+		SearchRequestBuilder srbMock = Mockito.mock(SearchRequestBuilder.class);
+
+		Map<String, Object> mockConfig = new HashMap<>();
+
+		Map<String, Object> rolesSettings = new HashMap<>();
+		rolesSettings.put("*.aa", "role1");
+		rolesSettings.put("bb", "role1");
+		rolesSettings.put("cc.*", TestUtils.createListOfStrings("role1", "role2"));
+		rolesSettings.put("dd", "role2");
+		mockConfig.put(SearchService.CFGNAME_SOURCE_FILTERING_FOR_ROLES, rolesSettings);
+
+		QuerySettings querySettings = new QuerySettings();
+
+		// case - check source filtering is applied if not any field is requested, as elasticsearch returns source in
+		// this case
+		{
+			Mockito.reset(srbMock, tested.configService, tested.authenticationUtilService);
+			Mockito.when(tested.configService.get(ConfigService.CFGNAME_SEARCH_RESPONSE_FIELDS)).thenReturn(mockConfig);
+			Mockito.when(srbMock.setFetchSource(Mockito.any(String[].class), Mockito.any(String[].class))).thenAnswer(
+					new SourceExcludeMatcher(srbMock, TestUtils.createListOfStrings("*.aa", "bb", "cc.*", "dd")));
+
+			tested.setSearchRequestFields(querySettings, srbMock);
+			Mockito.verify(tested.configService).get(ConfigService.CFGNAME_SEARCH_RESPONSE_FIELDS);
+			Mockito.verify(srbMock).setFetchSource(Mockito.any(String[].class), Mockito.any(String[].class));
+			Mockito.verifyNoMoreInteractions(srbMock);
+			Mockito.verifyNoMoreInteractions(tested.configService);
+		}
+
+		// set _source field as requested for other tests
+		querySettings.addField("_source");
+
+		// case - source filtering not applied when not configured
+		{
+			Mockito.reset(srbMock, tested.configService, tested.authenticationUtilService);
+			mockAuthenticatedUserWithRole(tested, "role1");
+			Mockito.when(tested.configService.get(ConfigService.CFGNAME_SEARCH_RESPONSE_FIELDS)).thenReturn(
+					new HashMap<String, Object>());
+
+			tested.setSearchRequestFields(querySettings, srbMock);
+			Mockito.verify(tested.configService).get(ConfigService.CFGNAME_SEARCH_RESPONSE_FIELDS);
+			Mockito.verify(srbMock).addFields("_source");
+			Mockito.verifyNoMoreInteractions(srbMock);
+			Mockito.verifyNoMoreInteractions(tested.configService);
+		}
+
+		// case - filtering configured, anonymous user has filtered source
+		{
+			Mockito.reset(srbMock, tested.configService, tested.authenticationUtilService);
+			Mockito.when(tested.configService.get(ConfigService.CFGNAME_SEARCH_RESPONSE_FIELDS)).thenReturn(mockConfig);
+			Mockito.when(srbMock.setFetchSource(Mockito.any(String[].class), Mockito.any(String[].class))).thenAnswer(
+					new SourceExcludeMatcher(srbMock, TestUtils.createListOfStrings("*.aa", "bb", "cc.*", "dd")));
+
+			tested.setSearchRequestFields(querySettings, srbMock);
+			Mockito.verify(tested.configService).get(ConfigService.CFGNAME_SEARCH_RESPONSE_FIELDS);
+			Mockito.verify(srbMock).addFields("_source");
+			Mockito.verify(srbMock).setFetchSource(Mockito.any(String[].class), Mockito.any(String[].class));
+			Mockito.verifyNoMoreInteractions(srbMock);
+			Mockito.verifyNoMoreInteractions(tested.configService);
+		}
+
+		// case - filtering configured, role1 and role2 users have filtered parts of source
+		{
+			Mockito.reset(srbMock, tested.configService, tested.authenticationUtilService);
+			mockAuthenticatedUserWithRole(tested, "role1");
+			Mockito.when(tested.configService.get(ConfigService.CFGNAME_SEARCH_RESPONSE_FIELDS)).thenReturn(mockConfig);
+			Mockito.when(srbMock.setFetchSource(Mockito.any(String[].class), Mockito.any(String[].class))).thenAnswer(
+					new SourceExcludeMatcher(srbMock, TestUtils.createListOfStrings("dd")));
+
+			tested.setSearchRequestFields(querySettings, srbMock);
+			Mockito.verify(tested.configService).get(ConfigService.CFGNAME_SEARCH_RESPONSE_FIELDS);
+			Mockito.verify(srbMock).addFields("_source");
+			Mockito.verify(srbMock).setFetchSource(Mockito.any(String[].class), Mockito.any(String[].class));
+			Mockito.verifyNoMoreInteractions(srbMock);
+			Mockito.verifyNoMoreInteractions(tested.configService);
+		}
+		{
+			Mockito.reset(srbMock, tested.configService, tested.authenticationUtilService);
+			mockAuthenticatedUserWithRole(tested, "role2");
+			Mockito.when(tested.configService.get(ConfigService.CFGNAME_SEARCH_RESPONSE_FIELDS)).thenReturn(mockConfig);
+			Mockito.when(srbMock.setFetchSource(Mockito.any(String[].class), Mockito.any(String[].class))).thenAnswer(
+					new SourceExcludeMatcher(srbMock, TestUtils.createListOfStrings("bb", "*.aa")));
+
+			tested.setSearchRequestFields(querySettings, srbMock);
+			Mockito.verify(tested.configService).get(ConfigService.CFGNAME_SEARCH_RESPONSE_FIELDS);
+			Mockito.verify(srbMock).addFields("_source");
+			Mockito.verify(srbMock).setFetchSource(Mockito.any(String[].class), Mockito.any(String[].class));
+			Mockito.verifyNoMoreInteractions(srbMock);
+			Mockito.verifyNoMoreInteractions(tested.configService);
+		}
+
+		// case - filtering configured, admin can see all fields, no any source filtering applied
+		{
+			Mockito.reset(srbMock, tested.configService, tested.authenticationUtilService);
+			mockAuthenticatedUserWithRole(tested, Role.ADMIN);
+			Mockito.when(tested.configService.get(ConfigService.CFGNAME_SEARCH_RESPONSE_FIELDS)).thenReturn(mockConfig);
+
+			tested.setSearchRequestFields(querySettings, srbMock);
+			Mockito.verify(tested.configService).get(ConfigService.CFGNAME_SEARCH_RESPONSE_FIELDS);
+			Mockito.verify(srbMock).addFields("_source");
+			Mockito.verifyNoMoreInteractions(srbMock);
+			Mockito.verifyNoMoreInteractions(tested.configService);
+		}
+	}
+
+	private static final class SourceExcludeMatcher implements Answer<SearchRequestBuilder> {
+
+		private SearchRequestBuilder srbMock;
+		private ArrayList<String> expectedExcludedFields;
+
+		public SourceExcludeMatcher(SearchRequestBuilder srbMockToReturn, ArrayList<String> expectedExcludedFields) {
+			this.srbMock = srbMockToReturn;
+			this.expectedExcludedFields = expectedExcludedFields;
+		}
+
+		@Override
+		public SearchRequestBuilder answer(InvocationOnMock invocation) throws Throwable {
+
+			Assert.assertNull(invocation.getArguments()[0]);
+
+			String[] actualStrings = (String[]) invocation.getArguments()[1];
+
+			Assert.assertEquals("size of expected and actual list of strings is not same", expectedExcludedFields.size(),
+					actualStrings.length);
+			for (String s : actualStrings) {
+				Assert.assertTrue(s + " is not in expected strings", expectedExcludedFields.contains(s));
+			}
+
+			return srbMock;
 		}
 
 	}
@@ -1002,44 +1162,44 @@ public class SearchServiceTest extends SearchServiceTestBase {
 	}
 
 	@Test
-	public void handleFacetSettings_common() throws IOException, JSONException, ReflectiveOperationException {
+	public void handleAggregationSettings_common() throws IOException, JSONException, ReflectiveOperationException {
 
 		Client client = Mockito.mock(Client.class);
 		ConfigService configService = mockConfigurationService();
 
 		SearchService tested = getTested(configService);
 
-		// case - no facets requested
+		// case - no aggregations requested
 		{
 			SearchRequestBuilder srbMock = new SearchRequestBuilder(client);
 			QuerySettings querySettings = new QuerySettings();
-			tested.handleFacetSettings(querySettings, null, srbMock);
+			tested.handleAggregationSettings(querySettings, null, srbMock);
 			Assert.assertEquals("{ }", srbMock.toString());
 		}
 
-		// case - one facet requested without filters
+		// case - one aggregation requested without filters
 		{
 			SearchRequestBuilder srbMock = new SearchRequestBuilder(client);
 			QuerySettings querySettings = new QuerySettings();
-			querySettings.addFacet("per_sys_type_counts");
+			querySettings.addAggregation("per_sys_type_counts");
 
-			tested.handleFacetSettings(querySettings, null, srbMock);
-			TestUtils.assertJsonContentFromClasspathFile("/search/query_facets_per_sys_type_counts.json", srbMock.toString());
+			tested.handleAggregationSettings(querySettings, null, srbMock);
+			TestUtils.assertJsonContentFromClasspathFile("/search/query_aggregations_per_sys_type_counts.json", srbMock.toString());
 		}
 
-		// case - more facets requested without filters
+		// case - more aggregations requested without filters
 		{
 			SearchRequestBuilder srbMock = new SearchRequestBuilder(client);
 			QuerySettings querySettings = new QuerySettings();
-			querySettings.addFacet("activity_dates_histogram");
-			querySettings.addFacet("per_project_counts");
-			querySettings.addFacet("tag_cloud");
-			querySettings.addFacet("top_contributors");
-			tested.handleFacetSettings(querySettings, null, srbMock);
-			TestUtils.assertJsonContentFromClasspathFile("/search/query_facets_moreNoFilter.json", srbMock.toString());
+			querySettings.addAggregation("activity_dates_histogram");
+			querySettings.addAggregation("per_project_counts");
+			querySettings.addAggregation("tag_cloud");
+			querySettings.addAggregation("top_contributors");
+			tested.handleAggregationSettings(querySettings, null, srbMock);
+			TestUtils.assertJsonContentFromClasspathFile("/search/query_aggregations_moreNoFilter.json", srbMock.toString());
 		}
 
-		// case - more facets requested with more filters
+		// case - more aggregations requested with more filters
 		{
 			SearchRequestBuilder srbMock = new SearchRequestBuilder(client);
 			QuerySettings querySettings = new QuerySettings();
@@ -1056,54 +1216,54 @@ public class SearchServiceTest extends SearchServiceTestBase {
 			filters.acknowledgeUrlFilterCandidate("tag", "tag1", "tag2");
 			tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
 			querySettings.setFilters(filters);
-			querySettings.addFacet("per_sys_type_counts");
-			querySettings.addFacet("activity_dates_histogram");
-			querySettings.addFacet("per_project_counts");
-			querySettings.addFacet("tag_cloud");
-			querySettings.addFacet("top_contributors");
-			tested.handleFacetSettings(querySettings, tested.parsedFilterConfigService.getSearchFiltersForRequest(), srbMock);
-			TestUtils.assertJsonContentFromClasspathFile("/search/query_facets_moreWithFilter.json", srbMock.toString());
+			querySettings.addAggregation("per_sys_type_counts");
+			querySettings.addAggregation("activity_dates_histogram");
+			querySettings.addAggregation("per_project_counts");
+			querySettings.addAggregation("tag_cloud");
+			querySettings.addAggregation("top_contributors");
+			tested.handleAggregationSettings(querySettings, tested.parsedFilterConfigService.getSearchFiltersForRequest(), srbMock);
+			TestUtils.assertJsonContentFromClasspathFile("/search/query_aggregations_moreWithFilter.json", srbMock.toString());
 		}
 	}
 
 	@Test
-	public void handleFacetSettings_top_contributors() throws IOException, JSONException, ReflectiveOperationException {
+	public void handleAggregationSettings_top_contributors() throws IOException, JSONException, ReflectiveOperationException {
 
 		Client client = Mockito.mock(Client.class);
 		ConfigService configService = mockConfigurationService();
 
 		SearchService tested = getTested(configService);
 
-		// case - no contributor filter used, so only one top_contributors facet
+		// case - no contributor filter used, so only one top_contributors aggregation
 		{
 			SearchRequestBuilder srbMock = new SearchRequestBuilder(client);
 			QuerySettings querySettings = new QuerySettings();
-			querySettings.addFacet("top_contributors");
+			querySettings.addAggregation("top_contributors");
 			Filters filters = new Filters();
 			filters.acknowledgeUrlFilterCandidate("tag", "tag1", "tag2");
 			tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
 			querySettings.setFilters(filters);
-			tested.handleFacetSettings(querySettings, tested.parsedFilterConfigService.getSearchFiltersForRequest(), srbMock);
-			TestUtils.assertJsonContentFromClasspathFile("/search/query_facets_top_contributors_1.json", srbMock.toString());
+			tested.handleAggregationSettings(querySettings, tested.parsedFilterConfigService.getSearchFiltersForRequest(), srbMock);
+			TestUtils.assertJsonContentFromClasspathFile("/search/query_aggregations_top_contributors_1.json", srbMock.toString());
 		}
 
-		// case - contributor filter used, so two top_contributors facets used
+		// case - contributor filter used, so two top_contributors aggregations used
 		{
 			SearchRequestBuilder srbMock = new SearchRequestBuilder(client);
 			QuerySettings querySettings = new QuerySettings();
-			querySettings.addFacet("top_contributors");
+			querySettings.addAggregation("top_contributors");
 			Filters filters = new Filters();
 			filters.acknowledgeUrlFilterCandidate("tag", "tag1", "tag2");
 			filters.acknowledgeUrlFilterCandidate("contributor", "John Doe <john@doe.org>");
 			tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
 			querySettings.setFilters(filters);
-			tested.handleFacetSettings(querySettings, tested.parsedFilterConfigService.getSearchFiltersForRequest(), srbMock);
-			TestUtils.assertJsonContentFromClasspathFile("/search/query_facets_top_contributors_2.json", srbMock.toString());
+			tested.handleAggregationSettings(querySettings, tested.parsedFilterConfigService.getSearchFiltersForRequest(), srbMock);
+			TestUtils.assertJsonContentFromClasspathFile("/search/query_aggregations_top_contributors_2.json", srbMock.toString());
 		}
 	}
 
 	@Test
-	public void handleFacetSettings_activity_dates_histogram() throws IOException, JSONException,
+	public void handleAggregationSettings_activity_dates_histogram() throws IOException, JSONException,
 			ReflectiveOperationException {
 
 		Client client = Mockito.mock(Client.class);
@@ -1115,13 +1275,13 @@ public class SearchServiceTest extends SearchServiceTestBase {
 		{
 			SearchRequestBuilder srbMock = new SearchRequestBuilder(client);
 			QuerySettings querySettings = new QuerySettings();
-			querySettings.addFacet("activity_dates_histogram");
+			querySettings.addAggregation("activity_dates_histogram");
 			Filters filters = new Filters();
 			filters.acknowledgeUrlFilterCandidate("tag", "tag1", "tag2");
 			tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
 			querySettings.setFilters(filters);
-			tested.handleFacetSettings(querySettings, tested.parsedFilterConfigService.getSearchFiltersForRequest(), srbMock);
-			TestUtils.assertJsonContentFromClasspathFile("/search/query_facets_activity_dates_histogram_1.json",
+			tested.handleAggregationSettings(querySettings, tested.parsedFilterConfigService.getSearchFiltersForRequest(), srbMock);
+			TestUtils.assertJsonContentFromClasspathFile("/search/query_aggregations_activity_dates_histogram_1.json",
 					srbMock.toString());
 		}
 
@@ -1129,7 +1289,7 @@ public class SearchServiceTest extends SearchServiceTestBase {
 		{
 			SearchRequestBuilder srbMock = new SearchRequestBuilder(client);
 			QuerySettings querySettings = new QuerySettings();
-			querySettings.addFacet("activity_dates_histogram");
+			querySettings.addAggregation("activity_dates_histogram");
 			Filters filters = new Filters();
 			filters.acknowledgeUrlFilterCandidate("tag", "tag1", "tag2");
 			filters.acknowledgeUrlFilterCandidate("activity_date_interval", PastIntervalValue.TEST.toString());
@@ -1139,8 +1299,8 @@ public class SearchServiceTest extends SearchServiceTestBase {
 					new DateTime(2256545l).toString(DATE_TIME_FORMATTER_UTC));
 			tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
 			querySettings.setFilters(filters);
-			tested.handleFacetSettings(querySettings, tested.parsedFilterConfigService.getSearchFiltersForRequest(), srbMock);
-			TestUtils.assertJsonContentFromClasspathFile("/search/query_facets_activity_dates_histogram_2.json",
+			tested.handleAggregationSettings(querySettings, tested.parsedFilterConfigService.getSearchFiltersForRequest(), srbMock);
+			TestUtils.assertJsonContentFromClasspathFile("/search/query_aggregations_activity_dates_histogram_2.json",
 					srbMock.toString());
 		}
 
@@ -1148,7 +1308,7 @@ public class SearchServiceTest extends SearchServiceTestBase {
 		{
 			SearchRequestBuilder srbMock = new SearchRequestBuilder(client);
 			QuerySettings querySettings = new QuerySettings();
-			querySettings.addFacet("activity_dates_histogram");
+			querySettings.addAggregation("activity_dates_histogram");
 			Filters filters = new Filters();
 			filters.acknowledgeUrlFilterCandidate("tag", "tag1", "tag2");
 			filters.acknowledgeUrlFilterCandidate("activity_date_from",
@@ -1157,8 +1317,8 @@ public class SearchServiceTest extends SearchServiceTestBase {
 					new DateTime(22256545l).toString(DATE_TIME_FORMATTER_UTC));
 			tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
 			querySettings.setFilters(filters);
-			tested.handleFacetSettings(querySettings, tested.parsedFilterConfigService.getSearchFiltersForRequest(), srbMock);
-			TestUtils.assertJsonContentFromClasspathFile("/search/query_facets_activity_dates_histogram_3.json",
+			tested.handleAggregationSettings(querySettings, tested.parsedFilterConfigService.getSearchFiltersForRequest(), srbMock);
+			TestUtils.assertJsonContentFromClasspathFile("/search/query_aggregations_activity_dates_histogram_3.json",
 					srbMock.toString());
 		}
 	}
@@ -1190,7 +1350,10 @@ public class SearchServiceTest extends SearchServiceTestBase {
 
 		{
 			SearchRequestBuilder srb = new SearchRequestBuilder(client);
-			querySettings.addFacet("activity_dates_histogram");
+			querySettings.addAggregation("activity_dates_histogram");
+			querySettings.addAggregation("per_project_counts");
+			querySettings.addAggregation("per_sys_type_counts");
+			querySettings.setQuery("This is client query");
 			filters.acknowledgeUrlFilterCandidate("activity_date_interval", PastIntervalValue.TEST.toString());
 			filters.acknowledgeUrlFilterCandidate("project", "eap");
 			filters.acknowledgeUrlFilterCandidate("sys_type", "issue");
@@ -1263,18 +1426,18 @@ public class SearchServiceTest extends SearchServiceTestBase {
 		String fieldName = "sys_activity_dates";
 
 		// case - no activity dates filter defined
-		Assert.assertEquals("month", tested.getDateHistogramFacetInterval(null));
+		Assert.assertEquals("month", tested.getDateHistogramAggregationInterval(null));
 
-		Assert.assertEquals("month", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("month", tested.getDateHistogramAggregationInterval(fieldName));
 
 		Filters filters = new Filters();
 		// case - activity date interval precedence against from/to
 		filters.acknowledgeUrlFilterCandidate("activity_date_interval", PastIntervalValue.YEAR.toString());
 		filters.acknowledgeUrlFilterCandidate("activity_date_from",
-				new DateTime().minus(1000000).toString(DATE_TIME_FORMATTER_UTC));
-		filters.acknowledgeUrlFilterCandidate("activity_date_to", new DateTime().toString(DATE_TIME_FORMATTER_UTC));
+				new DateTime(DateTimeZone.UTC).minus(1000000).toString(DATE_TIME_FORMATTER_UTC));
+		filters.acknowledgeUrlFilterCandidate("activity_date_to", new DateTime(DateTimeZone.UTC).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("week", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("week", tested.getDateHistogramAggregationInterval(fieldName));
 	}
 
 	@Test
@@ -1288,23 +1451,23 @@ public class SearchServiceTest extends SearchServiceTestBase {
 
 		filters.acknowledgeUrlFilterCandidate("activity_date_interval", PastIntervalValue.YEAR.toString());
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("week", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("week", tested.getDateHistogramAggregationInterval(fieldName));
 
 		filters.acknowledgeUrlFilterCandidate("activity_date_interval", PastIntervalValue.QUARTER.toString());
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("week", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("week", tested.getDateHistogramAggregationInterval(fieldName));
 
 		filters.acknowledgeUrlFilterCandidate("activity_date_interval", PastIntervalValue.MONTH.toString());
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("day", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("day", tested.getDateHistogramAggregationInterval(fieldName));
 
 		filters.acknowledgeUrlFilterCandidate("activity_date_interval", PastIntervalValue.WEEK.toString());
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("day", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("day", tested.getDateHistogramAggregationInterval(fieldName));
 
 		filters.acknowledgeUrlFilterCandidate("activity_date_interval", PastIntervalValue.DAY.toString());
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("hour", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("hour", tested.getDateHistogramAggregationInterval(fieldName));
 	}
 
 	@Test
@@ -1319,112 +1482,112 @@ public class SearchServiceTest extends SearchServiceTestBase {
 		// case - no from defined, so always month
 		filters.forgetUrlFilterCandidate("activity_date_from", "activity_date_to");
 		filters.acknowledgeUrlFilterCandidate("activity_date_from");
-		filters.acknowledgeUrlFilterCandidate("activity_date_to", new DateTime().toString(DATE_TIME_FORMATTER_UTC));
+		filters.acknowledgeUrlFilterCandidate("activity_date_to", new DateTime(DateTimeZone.UTC).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("month", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("month", tested.getDateHistogramAggregationInterval(fieldName));
 
 		filters.forgetUrlFilterCandidate("activity_date_from", "activity_date_to");
 		filters.acknowledgeUrlFilterCandidate("activity_date_to",
-				new DateTime().minusYears(10).toString(DATE_TIME_FORMATTER_UTC));
+				new DateTime(DateTimeZone.UTC).minusYears(10).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("month", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("month", tested.getDateHistogramAggregationInterval(fieldName));
 
 		// case - no to defined means current timestamp is used
 		filters.forgetUrlFilterCandidate("activity_date_from", "activity_date_to");
-		filters.acknowledgeUrlFilterCandidate("activity_date_from", new DateTime().toString(DATE_TIME_FORMATTER_UTC));
+		filters.acknowledgeUrlFilterCandidate("activity_date_from", new DateTime(DateTimeZone.UTC).toString(DATE_TIME_FORMATTER_UTC));
 		filters.acknowledgeUrlFilterCandidate("activity_date_to");
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("minute", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("minute", tested.getDateHistogramAggregationInterval(fieldName));
 
 		// clear cache
 		filters.forgetUrlFilterCandidate("activity_date_from", "activity_date_to");
 		filters.acknowledgeUrlFilterCandidate("activity_date_from",
-				new DateTime().minusHours(1).plusMillis(100).toString(DATE_TIME_FORMATTER_UTC));
+				new DateTime(DateTimeZone.UTC).minusHours(1).plusMillis(100).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("minute", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("minute", tested.getDateHistogramAggregationInterval(fieldName));
 		filters.acknowledgeUrlFilterCandidate("activity_date_from",
-				new DateTime().minusHours(1).minusMillis(100).toString(DATE_TIME_FORMATTER_UTC));
+				new DateTime(DateTimeZone.UTC).minusHours(1).minusMillis(100).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("hour", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("hour", tested.getDateHistogramAggregationInterval(fieldName));
 
 		filters.forgetUrlFilterCandidate("activity_date_from", "activity_date_to");
 		filters.acknowledgeUrlFilterCandidate("activity_date_from",
-				new DateTime().minusDays(2).plusMillis(100).toString(DATE_TIME_FORMATTER_UTC));
+				new DateTime(DateTimeZone.UTC).minusDays(2).plusMillis(100).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("hour", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("hour", tested.getDateHistogramAggregationInterval(fieldName));
 		filters.acknowledgeUrlFilterCandidate("activity_date_from",
-				new DateTime().minusDays(2).minusMillis(100).toString(DATE_TIME_FORMATTER_UTC));
+				new DateTime(DateTimeZone.UTC).minusDays(2).minusMillis(100).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("day", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("day", tested.getDateHistogramAggregationInterval(fieldName));
 
 		filters.forgetUrlFilterCandidate("activity_date_from", "activity_date_to");
 		filters.acknowledgeUrlFilterCandidate("activity_date_from", new DateTime(System.currentTimeMillis() - 1000L * 60L
 				* 60L * 24l * 7l * 8l + 100l).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("day", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("day", tested.getDateHistogramAggregationInterval(fieldName));
 		filters.acknowledgeUrlFilterCandidate("activity_date_from", new DateTime(System.currentTimeMillis() - 1000L * 60L
 				* 60L * 24l * 7l * 8l - 100l).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("week", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("week", tested.getDateHistogramAggregationInterval(fieldName));
 
 		filters.forgetUrlFilterCandidate("activity_date_from", "activity_date_to");
 		filters.acknowledgeUrlFilterCandidate("activity_date_from",
-				new DateTime().minusDays(366).plusMillis(100).toString(DATE_TIME_FORMATTER_UTC));
+				new DateTime(DateTimeZone.UTC).minusDays(366).plusMillis(100).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("week", tested.getDateHistogramFacetInterval(fieldName));
-		filters.acknowledgeUrlFilterCandidate("activity_date_from", new DateTime().minusDays(366).minusMillis(100)
+		Assert.assertEquals("week", tested.getDateHistogramAggregationInterval(fieldName));
+		filters.acknowledgeUrlFilterCandidate("activity_date_from", new DateTime(DateTimeZone.UTC).minusDays(366).minusMillis(100)
 				.toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("month", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("month", tested.getDateHistogramAggregationInterval(fieldName));
 
 		// case - both from and to defined
 		filters.forgetUrlFilterCandidate("activity_date_from", "activity_date_to");
 		filters.acknowledgeUrlFilterCandidate("activity_date_from", new DateTime(1000L).toString(DATE_TIME_FORMATTER_UTC));
 		filters.acknowledgeUrlFilterCandidate("activity_date_to", new DateTime(1200L).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("minute", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("minute", tested.getDateHistogramAggregationInterval(fieldName));
 
 		filters.acknowledgeUrlFilterCandidate("activity_date_to",
 				new DateTime(1000L + 1000L * 60L * 60L - 100L).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("minute", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("minute", tested.getDateHistogramAggregationInterval(fieldName));
 		filters.acknowledgeUrlFilterCandidate("activity_date_to",
 				new DateTime(1000L + 1000L * 60L * 60L + 100L).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("hour", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("hour", tested.getDateHistogramAggregationInterval(fieldName));
 
 		filters.acknowledgeUrlFilterCandidate("activity_date_from",
 				new DateTime(1000000L).toString(DATE_TIME_FORMATTER_UTC));
 		filters.acknowledgeUrlFilterCandidate("activity_date_to", new DateTime(1000000L + 1000L * 60L * 60L * 24l * 2l
 				- 100L).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("hour", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("hour", tested.getDateHistogramAggregationInterval(fieldName));
 		filters.acknowledgeUrlFilterCandidate("activity_date_to", new DateTime(1000000L + 1000L * 60L * 60L * 24l * 2l
 				+ 100L).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("day", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("day", tested.getDateHistogramAggregationInterval(fieldName));
 
 		filters.acknowledgeUrlFilterCandidate("activity_date_from",
 				new DateTime(100000000L).toString(DATE_TIME_FORMATTER_UTC));
 		filters.acknowledgeUrlFilterCandidate("activity_date_to", new DateTime(100000000L + 1000L * 60L * 60L * 24l * 7l
 				* 8l - 100L).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("day", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("day", tested.getDateHistogramAggregationInterval(fieldName));
 		filters.acknowledgeUrlFilterCandidate("activity_date_to", new DateTime(100000000L + 1000L * 60L * 60L * 24l * 7l
 				* 8l + 100L).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("week", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("week", tested.getDateHistogramAggregationInterval(fieldName));
 
 		filters.acknowledgeUrlFilterCandidate("activity_date_from",
 				new DateTime(1000000000L).toString(DATE_TIME_FORMATTER_UTC));
 		filters.acknowledgeUrlFilterCandidate("activity_date_to", new DateTime(1000000000L + 1000L * 60L * 60L * 24L * 366L
 				- 100L).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("week", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("week", tested.getDateHistogramAggregationInterval(fieldName));
 		filters.acknowledgeUrlFilterCandidate("activity_date_to", new DateTime(1000000000L + 1000L * 60L * 60L * 24L * 366L
 				+ 100L).toString(DATE_TIME_FORMATTER_UTC));
 		tested.parsedFilterConfigService.prepareFiltersForRequest(filters);
-		Assert.assertEquals("month", tested.getDateHistogramFacetInterval(fieldName));
+		Assert.assertEquals("month", tested.getDateHistogramAggregationInterval(fieldName));
 	}
 
 	@SuppressWarnings({ "unchecked", "rawtypes" })
