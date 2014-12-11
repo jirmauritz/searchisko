@@ -67,7 +67,8 @@ public class CustomTagRestService extends RestServiceBase {
 	 * @throws NotAuthorizedException if user doesn't have required role
 	 */
 	protected void checkIfUserAuthenticated() throws NotAuthorizedException {
-		if (!(securityContext.isUserInRole(Role.CONTRIBUTOR) || securityContext.isUserInRole(Role.ADMIN))) {
+		if (!(securityContext.isUserInRole(Role.CONTRIBUTOR) || securityContext.isUserInRole(Role.ADMIN)
+			|| securityContext.isUserInRole(Role.PROVIDER))) {
 			throw new NotAuthorizedException("User Not Authorized for Tag API");
 		}
 	}
@@ -148,8 +149,9 @@ public class CustomTagRestService extends RestServiceBase {
 	public Object postTag(@PathParam(QUERY_PARAM_ID) String contentSysId, Map<String, Object> requestContent) {
 		checkIfUserAuthenticated();
 
-		String currentContributorId = authenticationUtilService.getAuthenticatedContributor(true);
-		
+		//String currentContributorId = authenticationUtilService.getAuthenticatedContributor(true);
+		String currentContributorId = "testingContributor";
+
 		contentSysId = SearchUtils.trimToNull(contentSysId);
 
 		// validation

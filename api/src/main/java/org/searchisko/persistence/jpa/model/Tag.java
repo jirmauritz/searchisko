@@ -7,6 +7,7 @@ package org.searchisko.persistence.jpa.model;
 
 import java.io.Serializable;
 import java.sql.Timestamp;
+import javax.persistence.Column;
 
 import javax.persistence.Entity;
 import javax.persistence.GeneratedValue;
@@ -40,6 +41,7 @@ public class Tag implements Serializable {
 	/**
 	 * Text representation of the tagLabel.
 	 */
+	@Column(name = "TAG")
 	private String tagLabel;
 
 	/**
